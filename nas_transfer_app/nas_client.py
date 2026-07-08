@@ -131,6 +131,16 @@ class NasClient:
                 self._ssh_exec_ok = False
         return self._ssh_exec_ok
 
+    def _check_maxdepth_works(self):
+        if not hasattr(self, '_maxdepth_ok'):
+            try:
+                _, stdout_ch, _ = self.ssh.exec_command("find / -maxdepth 0", timeout=15)
+                stdout_ch.channel.settimeout(15)
+                # Read exit status to see if the command succeeded
+                self._maxdepth_ok = (stdout_ch.channel.recv_exit_status() == 0)
+            except Exception:
+                self._maxdepth_ok = False
+        return self._maxdepth_ok
 
     def search_packets(self, packet_ids, root="/", max_results_per_packet=200, cancel_event=None, stop_when_all_found=False, progress_callback=None):
         root = normalize_remote_path(root)
@@ -513,12 +523,13 @@ class NasClient:
             
             # Quickly locate PRO-LPT folders up to 5 levels deep, then search inside them.
             # This avoids scanning millions of irrelevant files across the entire NAS.
-            find_cmd = (
-                f"find {_shlex.quote(root)} -maxdepth 5 -type d -name 'PRO-LPT*' 2>/dev/null "
-                f"-exec find {{}} -type f -name '*.zip' 2>/dev/null \\;"
-            )
-            # Fallback to full search if maxdepth is not supported
-            command = f"if find / -maxdepth 0 >/dev/null 2>&1; then {find_cmd}; else find {_shlex.quote(root)} -type f -name '*.zip' 2>/dev/null; fi"
+            if self._check_maxdepth_works():
+                command = (
+                    f"find {_shlex.quote(root)} -maxdepth 5 -type d -name 'PRO-LPT*' 2>/dev/null "
+                    f"-exec find {{}} -type f -name '*.zip' 2>/dev/null \\;"
+                )
+            else:
+                command = f"find {_shlex.quote(root)} -type f -name '*.zip' 2>/dev/null"
             
             try:
                 _stdin, stdout_ch, _stderr = self.ssh.exec_command(command, timeout=600)
