@@ -495,41 +495,85 @@ class NasClient:
 
     def get_packet_analytics(self, root="/", cancel_event=None):
         """
-        Run `find <root> -type f -name '*.zip'` on the NAS via SSH and
-        aggregate results into folder-level packet counts plus a set of
-        unique packet IDs (based on filename without extension).
+        Count all .zip files on the NAS under `root`, grouped by their immediate
+        parent folder name. Returns total unique packet IDs and per-folder counts.
+
+        Tries SSH exec `find` first for speed. Falls back to SFTP recursive
+        walking if SSH exec is not supported by the NAS (same pattern as search_packets).
         """
-        if not self.ssh:
-            raise RuntimeError("SSH is not connected.")
-
-        import shlex as _shlex
-        command = f"find {_shlex.quote(root)} -type f -name '*.zip' 2>/dev/null"
-        _stdin, stdout, _stderr = self.ssh.exec_command(command, timeout=300)
-
-        # Block and read all output at once — this is the reliable way.
-        # exec_command opens a one-shot channel; stdout.read() drains it fully.
-        raw = stdout.read()
-
-        if cancel_event and cancel_event.is_set():
-            raise RuntimeError("Packet analytics cancelled.")
-
+        root = normalize_remote_path(root)
         folder_counts = defaultdict(int)
         unique_packets = set()
 
-        for line in raw.decode("utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if not line:
+        # ── SSH fast path ────────────────────────────────────────────────────
+        if self._check_ssh_exec_works():
+            import shlex as _shlex
+            command = f"find {_shlex.quote(root)} -type f -name '*.zip' 2>/dev/null"
+            try:
+                _stdin, stdout_ch, _stderr = self.ssh.exec_command(command, timeout=300)
+                # Drain line-by-line while watching for cancellation
+                import socket as _socket
+                stdout_ch.channel.settimeout(2.0)
+                while not stdout_ch.channel.exit_status_ready():
+                    if cancel_event and cancel_event.is_set():
+                        raise RuntimeError("Packet analytics cancelled.")
+                    try:
+                        line = stdout_ch.readline()
+                        if line:
+                            line = line.strip()
+                            if line:
+                                filename = posixpath.basename(line)
+                                folder = posixpath.basename(posixpath.dirname(line))
+                                if filename.lower().endswith(".zip"):
+                                    packet_id = filename[:-4].lower()
+                                    unique_packets.add(packet_id)
+                                    folder_counts[folder] += 1
+                    except _socket.timeout:
+                        pass
+                # Drain remainder
+                stdout_ch.channel.settimeout(None)
+                for line in stdout_ch:
+                    if cancel_event and cancel_event.is_set():
+                        raise RuntimeError("Packet analytics cancelled.")
+                    line = line.strip()
+                    if line:
+                        filename = posixpath.basename(line)
+                        folder = posixpath.basename(posixpath.dirname(line))
+                        if filename.lower().endswith(".zip"):
+                            packet_id = filename[:-4].lower()
+                            unique_packets.add(packet_id)
+                            folder_counts[folder] += 1
+                return {
+                    "total_unique": len(unique_packets),
+                    "unique_packets": unique_packets,
+                    "folder_counts": dict(folder_counts),
+                }
+            except RuntimeError:
+                raise
+            except Exception:
+                pass  # Fall through to SFTP walk
+
+        # ── SFTP recursive walk fallback ─────────────────────────────────────
+        stack = [root]
+        while stack:
+            if cancel_event and cancel_event.is_set():
+                raise RuntimeError("Packet analytics cancelled.")
+            current = stack.pop()
+            try:
+                items = self.sftp.listdir_attr(current)
+            except OSError:
                 continue
-            filename = posixpath.basename(line)
-            folder = posixpath.basename(posixpath.dirname(line))
-
-            if filename.lower().endswith(".zip"):
-                packet_id = filename[:-4].lower()
-            else:
-                packet_id = filename.lower()
-
-            unique_packets.add(packet_id)
-            folder_counts[folder] += 1
+            for item in items:
+                if cancel_event and cancel_event.is_set():
+                    raise RuntimeError("Packet analytics cancelled.")
+                item_path = remote_join(current, item.filename)
+                if is_remote_dir(item):
+                    stack.append(item_path)
+                elif is_remote_file(item) and item.filename.lower().endswith(".zip"):
+                    folder = posixpath.basename(current)
+                    packet_id = item.filename[:-4].lower()
+                    unique_packets.add(packet_id)
+                    folder_counts[folder] += 1
 
         return {
             "total_unique": len(unique_packets),
