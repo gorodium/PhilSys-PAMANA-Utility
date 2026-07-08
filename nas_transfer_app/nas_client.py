@@ -553,6 +553,9 @@ class NasClient:
                 for folder_name, pkts in sorted(machine_folder_unique.items()):
                     if cancel_event and cancel_event.is_set():
                         break
+                    # Only report folders starting with PRO-LPT
+                    if not folder_name.upper().startswith("PRO-LPT"):
+                        continue
                     folder_counts[folder_name] = len(pkts)
                     unique_packets.update(pkts)
                     if progress_callback:
@@ -576,7 +579,10 @@ class NasClient:
             return {"total_unique": 0, "unique_packets": set(), "folder_counts": {}}
 
         machine_folders = sorted(
-            [item for item in top_items if is_remote_dir(item)],
+            [
+                item for item in top_items
+                if is_remote_dir(item) and item.filename.upper().startswith("PRO-LPT")
+            ],
             key=lambda x: x.filename,
         )
 
