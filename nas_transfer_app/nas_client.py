@@ -509,13 +509,40 @@ class NasClient:
         if self._check_ssh_exec_works():
             import shlex as _shlex
             import socket as _socket
+            from collections import defaultdict as _dd
             command = f"find {_shlex.quote(root)} -type f -name '*.zip' 2>/dev/null"
             try:
                 _stdin, stdout_ch, _stderr = self.ssh.exec_command(command, timeout=600)
                 stdout_ch.channel.settimeout(2.0)
 
-                # Collect all paths then group by machine folder
-                all_paths = []
+                machine_folder_unique = _dd(set)
+                root_prefix = root.rstrip("/") + "/"
+                
+                updated_folders = set()
+                batch_state = [0]
+                
+                def process_path(p):
+                    filename = posixpath.basename(p)
+                    if not filename.lower().endswith(".zip"):
+                        return
+                    # Determine which machine folder (immediate child of root)
+                    rel = p[len(root_prefix):] if p.startswith(root_prefix) else posixpath.basename(posixpath.dirname(p))
+                    machine_folder = rel.split("/")[0]
+                    
+                    if not machine_folder.upper().startswith("PRO-LPT"):
+                        return
+                        
+                    packet_id = filename[:-4].lower()
+                    machine_folder_unique[machine_folder].add(packet_id)
+                    unique_packets.add(packet_id)
+                    updated_folders.add(machine_folder)
+                
+                def flush_updates():
+                    if progress_callback:
+                        for f in updated_folders:
+                            progress_callback(f, machine_folder_unique[f], len(unique_packets))
+                    updated_folders.clear()
+
                 while not stdout_ch.channel.exit_status_ready():
                     if cancel_event and cancel_event.is_set():
                         raise RuntimeError("Packet analytics cancelled.")
@@ -524,47 +551,35 @@ class NasClient:
                         if line:
                             line = line.strip()
                             if line:
-                                all_paths.append(line)
+                                process_path(line)
+                                batch_state[0] += 1
+                                if batch_state[0] >= 1000:
+                                    flush_updates()
+                                    batch_state[0] = 0
                     except _socket.timeout:
-                        pass
+                        if updated_folders:
+                            flush_updates()
+                            batch_state[0] = 0
+
                 stdout_ch.channel.settimeout(None)
                 for line in stdout_ch:
                     if cancel_event and cancel_event.is_set():
                         raise RuntimeError("Packet analytics cancelled.")
                     line = line.strip()
                     if line:
-                        all_paths.append(line)
+                        process_path(line)
+                        batch_state[0] += 1
+                        if batch_state[0] >= 1000:
+                            flush_updates()
+                            batch_state[0] = 0
 
-                # Group by top-level machine folder (first dir segment under root)
-                from collections import defaultdict as _dd
-                machine_folder_unique = _dd(set)
-                root_prefix = root.rstrip("/") + "/"
-                for p in all_paths:
-                    filename = posixpath.basename(p)
-                    if not filename.lower().endswith(".zip"):
-                        continue
-                    # Determine which machine folder (immediate child of root)
-                    rel = p[len(root_prefix):] if p.startswith(root_prefix) else posixpath.basename(posixpath.dirname(p))
-                    machine_folder = rel.split("/")[0]
-                    packet_id = filename[:-4].lower()
-                    machine_folder_unique[machine_folder].add(packet_id)
-
-                folder_unique_packets = {}
-                for folder_name, pkts in sorted(machine_folder_unique.items()):
-                    if cancel_event and cancel_event.is_set():
-                        break
-                    # Only report folders starting with PRO-LPT
-                    if not folder_name.upper().startswith("PRO-LPT"):
-                        continue
-                    folder_unique_packets[folder_name] = pkts
-                    unique_packets.update(pkts)
-                    if progress_callback:
-                        progress_callback(folder_name, pkts, len(unique_packets))
+                if updated_folders:
+                    flush_updates()
 
                 return {
                     "total_unique": len(unique_packets),
                     "unique_packets": unique_packets,
-                    "folder_unique_packets": folder_unique_packets,
+                    "folder_unique_packets": dict(machine_folder_unique),
                 }
             except RuntimeError:
                 raise
