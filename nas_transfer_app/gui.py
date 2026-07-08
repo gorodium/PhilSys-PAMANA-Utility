@@ -1081,6 +1081,9 @@ class MainWindow(QMainWindow):
         self.analytics_status.setText("Scanning NAS targets in parallel...")
         self.analytics_table.setRowCount(0)
         self.analytics_data.clear()
+        
+        # Extract UI values safely before background thread
+        chunk_size = self.chunk_size_mb.value()
     
         # Reset KPIs
         for kpi in [self.kpi_unique, self.kpi_kits, self.kpi_nas1, self.kpi_nas2, self.kpi_dups, self.kpi_mismatch]:
@@ -1199,7 +1202,7 @@ class MainWindow(QMainWindow):
             root = config.get("_root", "/")
             try:
                 client_config = {k: v for k, v in config.items() if not k.startswith("_")}
-                with NasClient(client_config, self.chunk_size_mb.value()) as client:
+                with NasClient(client_config, chunk_size) as client:
                     client.get_packet_analytics(
                         root=root,
                         cancel_event=self.analytics_cancel_event,
