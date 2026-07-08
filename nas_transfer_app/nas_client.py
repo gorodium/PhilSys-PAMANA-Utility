@@ -510,7 +510,16 @@ class NasClient:
             import shlex as _shlex
             import socket as _socket
             from collections import defaultdict as _dd
-            command = f"find {_shlex.quote(root)} -type f -name '*.zip' 2>/dev/null"
+            
+            # Quickly locate PRO-LPT folders up to 5 levels deep, then search inside them.
+            # This avoids scanning millions of irrelevant files across the entire NAS.
+            find_cmd = (
+                f"find {_shlex.quote(root)} -maxdepth 5 -type d -name 'PRO-LPT*' 2>/dev/null "
+                f"-exec find {{}} -type f -name '*.zip' 2>/dev/null \\;"
+            )
+            # Fallback to full search if maxdepth is not supported
+            command = f"if find / -maxdepth 0 >/dev/null 2>&1; then {find_cmd}; else find {_shlex.quote(root)} -type f -name '*.zip' 2>/dev/null; fi"
+            
             try:
                 _stdin, stdout_ch, _stderr = self.ssh.exec_command(command, timeout=600)
                 stdout_ch.channel.settimeout(2.0)
@@ -525,11 +534,15 @@ class NasClient:
                     filename = posixpath.basename(p)
                     if not filename.lower().endswith(".zip"):
                         return
-                    # Determine which machine folder (immediate child of root)
-                    rel = p[len(root_prefix):] if p.startswith(root_prefix) else posixpath.basename(posixpath.dirname(p))
-                    machine_folder = rel.split("/")[0]
-                    
-                    if not machine_folder.upper().startswith("PRO-LPT"):
+                        
+                    parts = p.split("/")
+                    machine_folder = None
+                    for part in parts:
+                        if part.upper().startswith("PRO-LPT"):
+                            machine_folder = part
+                            break
+                            
+                    if not machine_folder:
                         return
                         
                     packet_id = filename[:-4].lower()
@@ -586,28 +599,45 @@ class NasClient:
             except Exception:
                 pass  # Fall through to SFTP walk
 
-        # ── SFTP optimised walk: one top-level folder at a time ───────────────
-        # Step 1: list immediate children of root to get machine folders
+        # ── SFTP fallback path ───────────────────────────────────────────────
+        machine_folders = []
         try:
-            top_items = self.sftp.listdir_attr(root)
-        except OSError:
-            return {"total_unique": 0, "unique_packets": set(), "folder_unique_packets": {}}
+            # BFS to find PRO-LPT folders up to depth 4
+            queue = [(root, 0)]
+            visited = set()
+            
+            while queue:
+                if cancel_event and cancel_event.is_set():
+                    raise RuntimeError("Packet analytics cancelled.")
+                
+                current_dir, depth = queue.pop(0)
+                if current_dir in visited or depth > 4:
+                    continue
+                visited.add(current_dir)
+                
+                try:
+                    items = self.sftp.listdir_attr(current_dir)
+                except OSError:
+                    continue
+                    
+                for item in items:
+                    if not is_remote_dir(item):
+                        continue
+                    if item.filename.upper().startswith("PRO-LPT"):
+                        machine_folders.append((item.filename, remote_join(current_dir, item.filename)))
+                    else:
+                        if depth < 4:
+                            queue.append((remote_join(current_dir, item.filename), depth + 1))
+        except Exception:
+            pass
 
-        machine_folders = sorted(
-            [
-                item for item in top_items
-                if is_remote_dir(item) and item.filename.upper().startswith("PRO-LPT")
-            ],
-            key=lambda x: x.filename,
-        )
+        machine_folders.sort(key=lambda x: x[0])
 
         folder_unique_packets = {}
-        for folder_item in machine_folders:
+        for folder_name, folder_path in machine_folders:
             if cancel_event and cancel_event.is_set():
                 raise RuntimeError("Packet analytics cancelled.")
 
-            folder_name = folder_item.filename
-            folder_path = remote_join(root, folder_name)
             folder_unique = set()
 
             # Walk this single machine folder (may have sub-folders inside)
