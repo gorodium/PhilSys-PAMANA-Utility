@@ -1054,7 +1054,7 @@ class MainWindow(QMainWindow):
         for nas_name in ("NAS1", "NAS2"):
             try:
                 config = self.nas_config(nas_name)
-                config["_root"] = "/"
+                config["_root"] = normalize_remote_path(self.analytics_base_scan_dir.text() or "/Misamis Oriental")
                 config["_label"] = nas_name
                 configs.append(config)
             except Exception:
@@ -1291,6 +1291,13 @@ class MainWindow(QMainWindow):
         nas_grid.setColumnStretch(0, 1)
         nas_grid.setColumnStretch(1, 1)
         nas_layout.addLayout(nas_grid)
+        
+        self.analytics_base_scan_dir = QLineEdit()
+        self.analytics_base_scan_dir.setPlaceholderText("e.g. /Misamis Oriental")
+        nas_base_scan_layout = QHBoxLayout()
+        nas_base_scan_layout.addWidget(QLabel("Analytics Base Scan Directory:"))
+        nas_base_scan_layout.addWidget(self.analytics_base_scan_dir)
+        nas_layout.addLayout(nas_base_scan_layout)
 
         for nas_name in ("NAS1", "NAS2"):
             button = QPushButton(f"Test {nas_name} Connection")
@@ -1494,6 +1501,7 @@ class MainWindow(QMainWindow):
         self.retry_limit.setValue(int(self.settings["retry_limit"]))
         self.parallel_workers.setValue(int(self.settings.get("parallel_workers", DEFAULT_PARALLEL_WORKERS)))
         self.chunk_size_mb.setValue(int(self.settings.get("chunk_size_mb", DEFAULT_CHUNK_SIZE_MB)))
+        self.analytics_base_scan_dir.setText(self.settings.get("analytics_base_scan_dir", "/Misamis Oriental"))
         self.packet_search_root.setText(self.settings.get("packet_search_root", "/"))
         self.packet_target_nas.setCurrentText(self.settings.get("packet_target_nas", "NAS1"))
         self.packet_target_folder.setText(self.settings.get("packet_target_folder", DEFAULT_MATRIX_DESTINATION_ROOT))
@@ -1566,6 +1574,7 @@ class MainWindow(QMainWindow):
                 "retry_limit": self.retry_limit.value(),
                 "parallel_workers": self.parallel_workers.value(),
                 "chunk_size_mb": self.chunk_size_mb.value(),
+                "analytics_base_scan_dir": normalize_remote_path(self.analytics_base_scan_dir.text() or "/Misamis Oriental"),
                 "packet_search_root": normalize_remote_path(self.packet_search_root.text()),
                 "packet_target_nas": self.packet_target_nas.currentText(),
                 "packet_target_folder": normalize_remote_path(self.packet_target_folder.text()),
