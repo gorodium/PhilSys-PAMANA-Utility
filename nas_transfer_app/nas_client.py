@@ -521,15 +521,15 @@ class NasClient:
             import socket as _socket
             from collections import defaultdict as _dd
             
-            # Quickly locate PRO-LPT folders up to 5 levels deep, then search inside them.
-            # This avoids scanning millions of irrelevant files across the entire NAS.
-            if self._check_maxdepth_works():
-                command = (
-                    f"find {_shlex.quote(root)} -maxdepth 5 -type d -name 'PRO-LPT*' 2>/dev/null "
-                    f"-exec find {{}} -type f -name '*.zip' 2>/dev/null \\;"
-                )
-            else:
-                command = f"find {_shlex.quote(root)} -type f -name '*.zip' 2>/dev/null"
+            # Since PRO-LPT folders are immediate children of the root directory (or close to it),
+            # we use shell globbing to target them explicitly. This completely bypasses
+            # traversing millions of irrelevant files in other directories and works on all NAS shells
+            # without relying on `-maxdepth` or spawning hundreds of sub-processes.
+            
+            # Note: We append the glob to the root path safely.
+            # Example: find "/Misamis Oriental"/PRO-LPT* -type f -name '*.zip'
+            root_quoted = _shlex.quote(root.rstrip('/'))
+            command = f"find {root_quoted}/PRO-LPT* {root_quoted}/*/PRO-LPT* {root_quoted}/*/*/PRO-LPT* -type f -name '*.zip' 2>/dev/null"
             
             try:
                 _stdin, stdout_ch, _stderr = self.ssh.exec_command(command, timeout=600)
