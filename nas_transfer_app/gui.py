@@ -743,6 +743,7 @@ class MainWindow(QMainWindow):
             ("Search Packets", self.search_packets),
             ("Copy Selected", self.copy_selected_packets),
             ("Download Selected", self.download_selected_packets),
+            ("Download All", self.download_all_packets),
             ("Upload Local Packet", self.upload_local_packets),
             ("Create Folder", self.create_packet_folder),
             ("Export CSV", self.export_packet_results),
@@ -1866,18 +1867,33 @@ class MainWindow(QMainWindow):
                 search_root = root if root != "/" else default_root
                 self.events.put({"type": "ui_call", "callback": lambda v: self.packet_status.setText(f"Searching {_source_name}..."), "result": None})
                 with NasClient(config, self.chunk_size_mb.value()) as client:
-                    if machine_folder_by_packet:
+                    custom_unmapped = unmapped_packet_ids[:]
+                    custom_machine_map = {}
+                    
+                    for pid, m_folder in machine_folder_by_packet.items():
+                        if m_folder.casefold() in search_root.casefold():
+                            custom_unmapped.append(pid)
+                        else:
+                            custom_machine_map[pid] = m_folder
+
+                    if custom_machine_map:
                         results.extend(
                             client.search_packets_by_machine_folders(
-                                list(machine_folder_by_packet.keys()),
-                                machine_folder_by_packet,
+                                list(custom_machine_map.keys()),
+                                custom_machine_map,
                                 root=search_root,
                                 max_results_per_packet=1,
                                 cancel_event=self.packet_cancel_event,
                             )
                         )
-                    if unmapped_packet_ids:
-                        results.extend(client.search_packets(unmapped_packet_ids, search_root, cancel_event=self.packet_cancel_event))
+                    if custom_unmapped:
+                        results.extend(client.search_packets(
+                            custom_unmapped, 
+                            search_root, 
+                            cancel_event=self.packet_cancel_event,
+                            max_results_per_packet=1,
+                            stop_when_all_found=True
+                        ))
                 self.events.put({"type": "ui_call", "callback": lambda v: self.packet_progress.setValue(v), "result": nas_idx})
             return results
 
@@ -1997,6 +2013,39 @@ class MainWindow(QMainWindow):
             lambda downloaded: self.packet_status.setText(f"Downloaded {len(downloaded)} packet file(s)."),
             self.background_error,
         )
+
+    def download_all_packets(self):
+        results = [r for r in self.packet_results if r.status == "Found"]
+        if not results:
+            QMessageBox.warning(self, "Download Packets", "No packets were found to download.")
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Choose Download Folder")
+        if not folder:
+            return
+        self.packet_status.setText(f"Downloading {len(results)} packets...")
+
+        def task():
+            downloaded = []
+            clients = {}
+            try:
+                for result in results:
+                    client = clients.get(result.nas_source)
+                    if client is None:
+                        client = NasClient(self.config_for_source(result.nas_source), self.chunk_size_mb.value())
+                        client.connect()
+                        clients[result.nas_source] = client
+                    downloaded.append(client.download_file(result.found_location, folder))
+                return downloaded
+            finally:
+                for client in clients.values():
+                    client.close()
+
+        self.run_background(
+            task,
+            lambda downloaded: self.packet_status.setText(f"Downloaded {len(downloaded)} packet file(s)."),
+            self.background_error,
+        )
+
 
     def upload_local_packets(self):
         paths, _filter = QFileDialog.getOpenFileNames(self, "Choose Packet Files")

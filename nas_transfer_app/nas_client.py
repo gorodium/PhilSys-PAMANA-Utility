@@ -138,6 +138,7 @@ class NasClient:
         counts = {packet.casefold(): 0 for packet in packet_ids}
         results = []
 
+        import socket
         def _try_ssh_find():
             """Attempt a fast NAS-side search via SSH exec_command.
             Raises RuntimeError if SSH exec does not work on this NAS.
@@ -153,13 +154,31 @@ class NasClient:
             chunk_size = 20
             packet_ids_list = list(packet_ids)
             for i in range(0, len(packet_ids_list), chunk_size):
+                if cancel_event and cancel_event.is_set():
+                    raise RuntimeError("Packet search cancelled.")
                 chunk = packet_ids_list[i:i + chunk_size]
                 target_str = " -o ".join(f"-name '*{escape_sh(pid)}*'" for pid in chunk)
                 find_cmd = f"find '{escape_sh(root)}' -type f \\( {target_str} \\) 2>/dev/null"
-                _, stdout_ch, _ = self.ssh.exec_command(find_cmd, timeout=60)
-                stdout_ch.channel.settimeout(60)
-                # Read line by line to avoid buffering deadlocks
+                _, stdout_ch, _ = self.ssh.exec_command(find_cmd, timeout=300)
+                stdout_ch.channel.settimeout(2.0)
+                
+                while not stdout_ch.channel.exit_status_ready():
+                    if cancel_event and cancel_event.is_set():
+                        raise RuntimeError("Packet search cancelled.")
+                    try:
+                        line = stdout_ch.readline()
+                        if line:
+                            p = line.rstrip("\n")
+                            if p:
+                                all_paths.append(p)
+                    except socket.timeout:
+                        pass
+                
+                # Drain any remaining output
+                stdout_ch.channel.settimeout(None)
                 for line in stdout_ch:
+                    if cancel_event and cancel_event.is_set():
+                        raise RuntimeError("Packet search cancelled.")
                     p = line.rstrip("\n")
                     if p:
                         all_paths.append(p)
@@ -168,8 +187,13 @@ class NasClient:
         ssh_paths = None
         try:
             ssh_paths = _try_ssh_find()
-        except Exception:
-            ssh_paths = None
+        except RuntimeError as e:
+            if "SSH exec_command not supported" in str(e):
+                ssh_paths = None  # Expected fallback to SFTP
+            else:
+                raise  # Cancellation or timeout - do not fall back
+        except Exception as e:
+            raise RuntimeError(f"Search failed: {e}")
 
         if ssh_paths is not None:
             # SSH fast path succeeded (and SSH exec is verified working on this NAS)
@@ -285,7 +309,8 @@ class NasClient:
         found = defaultdict(list)
         if not targets:
             return found
-
+        
+        import socket
         try:
             def escape_sh(s):
                 return s.replace("'", "'\\''")
@@ -297,28 +322,51 @@ class NasClient:
             chunk_size = 20
             targets_list = list(targets.values())
             for i in range(0, len(targets_list), chunk_size):
+                if cancel_event and cancel_event.is_set():
+                    raise RuntimeError("Directory search cancelled.")
                 chunk = targets_list[i:i + chunk_size]
-                target_str = " -o ".join(f"-iname '{escape_sh(name)}'" for name in chunk)
-                find_cmd = f"find '{escape_sh(root)}' -maxdepth {max_depth} -type d \\( {target_str} \\) 2>/dev/null"
-                _, stdout_ch, _ = self.ssh.exec_command(find_cmd, timeout=60)
-                stdout_ch.channel.settimeout(60)
-                # Read line by line — do NOT call recv_exit_status before read()
+                target_str = " -o ".join(f"-name '{escape_sh(name)}'" for name in chunk)
+                find_cmd = f"find '{escape_sh(root)}' -type d \\( {target_str} \\) 2>/dev/null"
+                _, stdout_ch, _ = self.ssh.exec_command(find_cmd, timeout=300)
+                stdout_ch.channel.settimeout(2.0)
+                
+                while not stdout_ch.channel.exit_status_ready():
+                    if cancel_event and cancel_event.is_set():
+                        raise RuntimeError("Directory search cancelled.")
+                    try:
+                        line = stdout_ch.readline()
+                        if line:
+                            p = line.rstrip("\n")
+                            if p:
+                                all_paths.append(p)
+                    except socket.timeout:
+                        pass
+                
+                stdout_ch.channel.settimeout(None)
                 for line in stdout_ch:
+                    if cancel_event and cancel_event.is_set():
+                        raise RuntimeError("Directory search cancelled.")
                     p = line.rstrip("\n")
                     if p:
                         all_paths.append(p)
 
             for p in all_paths:
                 if cancel_event and cancel_event.is_set():
-                    raise RuntimeError("Packet search cancelled.")
+                    raise RuntimeError("Directory search cancelled.")
                 p = normalize_remote_path(p)
                 name_key = posixpath.basename(p).casefold()
                 if name_key in targets:
                     found[targets[name_key]].append(p)
             if len(found) == len(targets):
                 return found
-        except Exception:
-            pass
+                
+            return found
+
+        except RuntimeError as e:
+            if "SSH exec not supported" not in str(e):
+                raise
+        except Exception as e:
+            raise RuntimeError(f"Directory search failed: {e}")
 
         stack = [(root, 0)]
         while stack and len(found) < len(targets):

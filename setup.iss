@@ -2,7 +2,7 @@
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "PhilSys"
 #define MyAppExeName "nas_transfer_gui.exe"
-#define MyAppIcon "assets\nas_transfer_icon.ico"
+#define MyAppIcon "assets\pamana_logo.ico"
 
 [Setup]
 AppId={{9F82B3E1-4D6F-4B52-9A8C-8F7E6D5C4B3A}
