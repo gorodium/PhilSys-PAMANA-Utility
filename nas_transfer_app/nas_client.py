@@ -556,35 +556,39 @@ class NasClient:
                             progress_callback(f, machine_folder_unique[f], len(unique_packets))
                     updated_folders.clear()
 
+                buffer = ""
                 while not stdout_ch.channel.exit_status_ready():
                     if cancel_event and cancel_event.is_set():
                         raise RuntimeError("Packet analytics cancelled.")
                     try:
-                        line = stdout_ch.readline()
-                        if line:
-                            line = line.strip()
-                            if line:
-                                process_path(line)
-                                batch_state[0] += 1
-                                if batch_state[0] >= 1000:
-                                    flush_updates()
-                                    batch_state[0] = 0
+                        chunk_bytes = stdout_ch.channel.recv(8192)
+                        if not chunk_bytes:
+                            break
+                        buffer += chunk_bytes.decode('utf-8', errors='replace')
+                        if '\n' in buffer:
+                            lines = buffer.split('\n')
+                            buffer = lines.pop()
+                            for line in lines:
+                                line = line.strip()
+                                if line:
+                                    process_path(line)
+                                    batch_state[0] += 1
+                                    if batch_state[0] >= 1000:
+                                        flush_updates()
+                                        batch_state[0] = 0
                     except _socket.timeout:
-                        if updated_folders:
+                        if batch_state[0] > 0:
                             flush_updates()
                             batch_state[0] = 0
 
-                stdout_ch.channel.settimeout(None)
-                for line in stdout_ch:
-                    if cancel_event and cancel_event.is_set():
-                        raise RuntimeError("Packet analytics cancelled.")
-                    line = line.strip()
+                # Process any remaining buffer
+                if buffer:
+                    line = buffer.strip()
                     if line:
                         process_path(line)
-                        batch_state[0] += 1
-                        if batch_state[0] >= 1000:
-                            flush_updates()
-                            batch_state[0] = 0
+                        
+                stdout_ch.channel.settimeout(None)
+                # Channel is already exhausted, no need to loop stdout_ch again
 
                 if updated_folders:
                     flush_updates()
@@ -596,7 +600,8 @@ class NasClient:
                 }
             except RuntimeError:
                 raise
-            except Exception:
+            except Exception as e:
+                print(f"SSH fast path failed: {repr(e)}")
                 pass  # Fall through to SFTP walk
 
         # ── SFTP fallback path ───────────────────────────────────────────────
