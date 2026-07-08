@@ -493,6 +493,50 @@ class NasClient:
         self.sftp.utime(remote_path, (modified, modified))
         return remote_path
 
+    def get_packet_analytics(self, root="/", cancel_event=None):
+        """
+        Run `find <root> -type f -name '*.zip'` on the NAS via SSH and
+        aggregate results into folder-level packet counts plus a set of
+        unique packet IDs (based on filename without extension).
+        """
+        if not self.ssh:
+            raise RuntimeError("SSH is not connected.")
+
+        import shlex as _shlex
+        command = f"find {_shlex.quote(root)} -type f -name '*.zip' 2>/dev/null"
+        _stdin, stdout, _stderr = self.ssh.exec_command(command, timeout=300)
+
+        # Block and read all output at once — this is the reliable way.
+        # exec_command opens a one-shot channel; stdout.read() drains it fully.
+        raw = stdout.read()
+
+        if cancel_event and cancel_event.is_set():
+            raise RuntimeError("Packet analytics cancelled.")
+
+        folder_counts = defaultdict(int)
+        unique_packets = set()
+
+        for line in raw.decode("utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            filename = posixpath.basename(line)
+            folder = posixpath.basename(posixpath.dirname(line))
+
+            if filename.lower().endswith(".zip"):
+                packet_id = filename[:-4].lower()
+            else:
+                packet_id = filename.lower()
+
+            unique_packets.add(packet_id)
+            folder_counts[folder] += 1
+
+        return {
+            "total_unique": len(unique_packets),
+            "unique_packets": unique_packets,
+            "folder_counts": dict(folder_counts),
+        }
+
 
 def copy_remote_to_remote(source_config, destination_config, source_path, destination_folder, chunk_size_mb=DEFAULT_CHUNK_SIZE_MB, max_retries=3):
     import time
