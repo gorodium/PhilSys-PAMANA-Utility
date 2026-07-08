@@ -497,7 +497,7 @@ class NasClient:
         """
         Count all .zip files on the NAS under `root`, grouped by immediate parent folder.
         After each top-level machine folder is fully counted, calls:
-            progress_callback(folder_name, folder_count, running_unique_total)
+            progress_callback(folder_name, folder_packets_set, running_unique_total)
         so the UI can stream results live without waiting for the full scan.
 
         Tries SSH exec `find` first; falls back to SFTP per-folder walk.
@@ -549,22 +549,22 @@ class NasClient:
                     packet_id = filename[:-4].lower()
                     machine_folder_unique[machine_folder].add(packet_id)
 
-                folder_counts = {}
+                folder_unique_packets = {}
                 for folder_name, pkts in sorted(machine_folder_unique.items()):
                     if cancel_event and cancel_event.is_set():
                         break
                     # Only report folders starting with PRO-LPT
                     if not folder_name.upper().startswith("PRO-LPT"):
                         continue
-                    folder_counts[folder_name] = len(pkts)
+                    folder_unique_packets[folder_name] = pkts
                     unique_packets.update(pkts)
                     if progress_callback:
-                        progress_callback(folder_name, len(pkts), len(unique_packets))
+                        progress_callback(folder_name, pkts, len(unique_packets))
 
                 return {
                     "total_unique": len(unique_packets),
                     "unique_packets": unique_packets,
-                    "folder_counts": folder_counts,
+                    "folder_unique_packets": folder_unique_packets,
                 }
             except RuntimeError:
                 raise
@@ -576,7 +576,7 @@ class NasClient:
         try:
             top_items = self.sftp.listdir_attr(root)
         except OSError:
-            return {"total_unique": 0, "unique_packets": set(), "folder_counts": {}}
+            return {"total_unique": 0, "unique_packets": set(), "folder_unique_packets": {}}
 
         machine_folders = sorted(
             [
@@ -586,7 +586,7 @@ class NasClient:
             key=lambda x: x.filename,
         )
 
-        folder_counts = {}
+        folder_unique_packets = {}
         for folder_item in machine_folders:
             if cancel_event and cancel_event.is_set():
                 raise RuntimeError("Packet analytics cancelled.")
@@ -613,15 +613,15 @@ class NasClient:
                         folder_unique.add(item.filename[:-4].lower())
 
             if folder_unique:
-                folder_counts[folder_name] = len(folder_unique)
+                folder_unique_packets[folder_name] = folder_unique
                 unique_packets.update(folder_unique)
                 if progress_callback:
-                    progress_callback(folder_name, len(folder_unique), len(unique_packets))
+                    progress_callback(folder_name, folder_unique, len(unique_packets))
 
         return {
             "total_unique": len(unique_packets),
             "unique_packets": unique_packets,
-            "folder_counts": folder_counts,
+            "folder_unique_packets": folder_unique_packets,
         }
 
 

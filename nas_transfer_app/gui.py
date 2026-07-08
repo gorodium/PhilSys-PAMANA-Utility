@@ -910,40 +910,108 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(16)
+    
+        # Header
+        header_layout = QHBoxLayout()
+        titles_layout = QVBoxLayout()
         header = QLabel("NAS Packet Analytics")
-        header.setStyleSheet("font-size: 22px; font-weight: 800; color: #0038A8;")
-        layout.addWidget(header)
-
-        top_row = QHBoxLayout()
-        self.analytics_total_label = QLabel("Total Unique Packets: 0")
-        self.analytics_total_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #155724; background: #d4edda; padding: 12px; border-radius: 6px;")
-        
-        self.analytics_sync_btn = QPushButton("Sync Now")
+        header.setStyleSheet("font-size: 24px; font-weight: 800; color: #0038A8;")
+        subtitle = QLabel("Read-only consolidated packet count from NAS1 and NAS2")
+        subtitle.setStyleSheet("color: #555555; font-size: 12px;")
+    
+        # Badge
+        badge = QLabel("Read-only mode")
+        badge.setStyleSheet("background: #e2e3e5; color: #383d41; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold;")
+    
+        tt_layout = QHBoxLayout()
+        tt_layout.addWidget(header)
+        tt_layout.addWidget(badge)
+        tt_layout.addStretch()
+    
+        titles_layout.addLayout(tt_layout)
+        titles_layout.addWidget(subtitle)
+    
+        # Controls
+        controls_layout = QHBoxLayout()
+        self.analytics_status = QLabel("Ready")
+        self.analytics_status.setStyleSheet("color: #666;")
+    
+        self.analytics_sync_btn = QPushButton("Scan Now")
         self.analytics_sync_btn.setObjectName("PrimaryButton")
-        self.analytics_sync_btn.setFixedWidth(120)
+        self.analytics_sync_btn.setFixedWidth(140)
         self.analytics_sync_btn.clicked.connect(self.sync_nas_analytics)
 
         self.analytics_cancel_btn = QPushButton("Cancel")
         self.analytics_cancel_btn.setFixedWidth(80)
         self.analytics_cancel_btn.clicked.connect(self.cancel_nas_analytics)
         self.analytics_cancel_btn.hide()
-        
-        self.analytics_status = QLabel("Ready")
-        self.analytics_cancel_event = threading.Event()
-        
-        top_row.addWidget(self.analytics_total_label)
-        top_row.addStretch(1)
-        top_row.addWidget(self.analytics_status)
-        top_row.addWidget(self.analytics_cancel_btn)
-        top_row.addWidget(self.analytics_sync_btn)
-        layout.addLayout(top_row)
+    
+        controls_layout.addStretch()
+        controls_layout.addWidget(self.analytics_status)
+        controls_layout.addWidget(self.analytics_cancel_btn)
+        controls_layout.addWidget(self.analytics_sync_btn)
+    
+        header_layout.addLayout(titles_layout)
+        header_layout.addLayout(controls_layout)
+        layout.addLayout(header_layout)
 
-        self.analytics_table = QTableWidget(0, 3)
-        self.analytics_table.setHorizontalHeaderLabels(["NAS Source", "Machine Folder", "Packet Count"])
+        # KPI Cards (Grid)
+        grid = QGridLayout()
+        grid.setSpacing(16)
+    
+        def make_card(title, value, color="#0038A8"):
+            frame = QFrame()
+            frame.setStyleSheet(f"background: white; border-radius: 8px; border: 1px solid #e0e0e0;")
+            flayout = QVBoxLayout(frame)
+            flayout.setContentsMargins(16, 16, 16, 16)
+            t_lbl = QLabel(title)
+            t_lbl.setStyleSheet("color: #666; font-size: 12px; font-weight: bold; border: none;")
+            v_lbl = QLabel(str(value))
+            v_lbl.setStyleSheet(f"color: {color}; font-size: 24px; font-weight: bold; border: none;")
+            flayout.addWidget(t_lbl)
+            flayout.addWidget(v_lbl)
+            return frame, v_lbl
+
+        f1, self.kpi_unique = make_card("Total Unique Packets", "0", "#155724")
+        f2, self.kpi_kits = make_card("Registration Kits", "0", "#0038A8")
+        f3, self.kpi_nas1 = make_card("NAS1 Packets", "0", "#0038A8")
+        f4, self.kpi_nas2 = make_card("NAS2 Packets", "0", "#0038A8")
+        f5, self.kpi_dups = make_card("Duplicate Packets", "0", "#856404")
+        f6, self.kpi_mismatch = make_card("Mismatched Kits", "0", "#721c24")
+    
+        grid.addWidget(f1, 0, 0)
+        grid.addWidget(f2, 0, 1)
+        grid.addWidget(f3, 0, 2)
+        grid.addWidget(f4, 1, 0)
+        grid.addWidget(f5, 1, 1)
+        grid.addWidget(f6, 1, 2)
+        layout.addLayout(grid)
+
+        # Filter / Search Bar
+        filter_layout = QHBoxLayout()
+        self.analytics_search = QLineEdit()
+        self.analytics_search.setPlaceholderText("Search Registration Kit (e.g. PRO-LPT-001)")
+        self.analytics_search.textChanged.connect(self.filter_analytics_table)
+    
+        self.analytics_filter = QComboBox()
+        self.analytics_filter.addItems(["All Status", "Complete", "Mismatch", "NAS1 Only", "NAS2 Only", "Empty Folder"])
+        self.analytics_filter.currentTextChanged.connect(self.filter_analytics_table)
+    
+        filter_layout.addWidget(self.analytics_search, stretch=2)
+        filter_layout.addWidget(self.analytics_filter, stretch=1)
+        layout.addLayout(filter_layout)
+
+        # Table
+        self.analytics_table = QTableWidget(0, 7)
+        self.analytics_table.setHorizontalHeaderLabels([
+            "Registration Kit", "NAS1 Packets", "NAS2 Packets", 
+            "Unique Packets", "Duplicates", "Source", "Status"
+        ])
         self.analytics_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.analytics_table.setSortingEnabled(True)
         self.analytics_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-
+        self.analytics_table.verticalHeader().setVisible(False)
+    
         self.analytics_progress = QProgressBar()
         self.analytics_progress.setTextVisible(True)
         self.analytics_progress.setValue(0)
@@ -952,7 +1020,28 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.analytics_progress)
 
         layout.addWidget(self.analytics_table, stretch=1)
+    
+        # Internal state for tracking row items by kit name
+        self.analytics_data = {}
         return page
+
+    def filter_analytics_table(self):
+        search_text = self.analytics_search.text().lower()
+        status_filter = self.analytics_filter.currentText()
+    
+        for row in range(self.analytics_table.rowCount()):
+            kit_item = self.analytics_table.item(row, 0)
+            status_item = self.analytics_table.item(row, 6)
+            if not kit_item or not status_item:
+                continue
+            
+            kit = kit_item.text().lower()
+            status = status_item.text()
+        
+            match_search = search_text in kit
+            match_status = (status_filter == "All Status" or status_filter == status)
+        
+            self.analytics_table.setRowHidden(row, not (match_search and match_status))
 
     def cancel_nas_analytics(self):
         self.analytics_cancel_event.set()
@@ -960,7 +1049,6 @@ class MainWindow(QMainWindow):
         self.analytics_cancel_btn.setEnabled(False)
 
     def sync_nas_analytics(self):
-        # Build configs from the NAS Credentials saved in Settings (NAS1 / NAS2)
         configs = []
         for nas_name in ("NAS1", "NAS2"):
             try:
@@ -969,95 +1057,164 @@ class MainWindow(QMainWindow):
                 config["_label"] = nas_name
                 configs.append(config)
             except Exception:
-                pass  # skip if credentials are missing
+                pass
 
         if not configs:
             QMessageBox.warning(
                 self,
                 "NAS Analytics",
-                "NAS credentials are not configured or missing.\n"
-                "Please fill in username and password for NAS1 / NAS2 in Settings.",
+                "NAS credentials are not configured or missing.",
             )
             return
+
         self.analytics_sync_btn.setEnabled(False)
         self.analytics_sync_btn.hide()
         self.analytics_cancel_btn.setEnabled(True)
         self.analytics_cancel_btn.show()
 
-        # Indeterminate bouncing bar — shows motion even when folder count is unknown
         self.analytics_progress.setMinimum(0)
         self.analytics_progress.setMaximum(0)
         self.analytics_progress.setFormat("Scanning...")
         self.analytics_progress.show()
 
-        self.analytics_status.setText("Connecting...")
+        self.analytics_status.setText("Scanning NAS targets in parallel...")
         self.analytics_table.setRowCount(0)
-        self.analytics_total_label.setText("Total Unique Packets: 0")
+        self.analytics_data.clear()
+    
+        # Reset KPIs
+        for kpi in [self.kpi_unique, self.kpi_kits, self.kpi_nas1, self.kpi_nas2, self.kpi_dups, self.kpi_mismatch]:
+            kpi.setText("0")
+        
         self.analytics_cancel_event.clear()
-
-        # Shared mutable counters accessible from the callback (list wrapping int)
-        _folders_done = [0]
-        _unique_total = [0]
-
+    
+        # Global state for background workers
+        global_merged = {}
+        global_lock = threading.Lock()
+    
         def make_folder_callback(nas_label):
-            """Returns a callback called by NasClient after each machine folder is done."""
-            def callback(folder_name, folder_count, running_unique_total):
-                _folders_done[0] += 1
-                _unique_total[0] = running_unique_total
-                n = _folders_done[0]
+            def callback(folder_name, folder_packets, running_unique_total):
+                with global_lock:
+                    if folder_name not in global_merged:
+                        global_merged[folder_name] = {"NAS1": set(), "NAS2": set()}
+                    global_merged[folder_name][nas_label] = set(folder_packets)
+                
+                    # Compute stats for this folder
+                    n1 = len(global_merged[folder_name]["NAS1"])
+                    n2 = len(global_merged[folder_name]["NAS2"])
+                    u = len(global_merged[folder_name]["NAS1"] | global_merged[folder_name]["NAS2"])
+                    d = len(global_merged[folder_name]["NAS1"] & global_merged[folder_name]["NAS2"])
+                
+                    if n1 > 0 and n2 > 0:
+                        src = "NAS1 + NAS2"
+                        status = "Complete" if n1 == n2 and u == n1 else "Mismatch"
+                    elif n1 > 0:
+                        src = "NAS1 Only"
+                        status = "NAS1 Only"
+                    elif n2 > 0:
+                        src = "NAS2 Only"
+                        status = "NAS2 Only"
+                    else:
+                        src = "Empty"
+                        status = "Empty Folder"
+                    
+                    # Calculate global totals
+                    tot_u = set()
+                    tot_n1 = 0
+                    tot_n2 = 0
+                    tot_d = 0
+                    tot_mm = 0
+                
+                    for f, data in global_merged.items():
+                        fs1 = data["NAS1"]
+                        fs2 = data["NAS2"]
+                        tot_n1 += len(fs1)
+                        tot_n2 += len(fs2)
+                        tot_u.update(fs1 | fs2)
+                        tot_d += len(fs1 & fs2)
+                    
+                        cn1 = len(fs1)
+                        cn2 = len(fs2)
+                        cu = len(fs1 | fs2)
+                        if (cn1 > 0 and cn2 > 0) and (cn1 != cn2 or cu != cn1):
+                            tot_mm += 1
 
-                def update(_fn=folder_name, _c=folder_count, _t=running_unique_total,
-                           _l=nas_label, _n=n):
-                    # Add row to table live
+                    stats = {
+                        "f": folder_name,
+                        "n1": n1, "n2": n2, "u": u, "d": d, "src": src, "status": status,
+                        "tot_kits": len(global_merged),
+                        "tot_u": len(tot_u),
+                        "tot_n1": tot_n1,
+                        "tot_n2": tot_n2,
+                        "tot_d": tot_d,
+                        "tot_mm": tot_mm
+                    }
+                
+                def update(_s=stats):
                     self.analytics_table.setSortingEnabled(False)
-                    row = self.analytics_table.rowCount()
-                    self.analytics_table.insertRow(row)
-                    self.analytics_table.setItem(row, 0, readonly_item(_l))
-                    self.analytics_table.setItem(row, 1, readonly_item(_fn))
-                    count_item = QTableWidgetItem()
-                    count_item.setData(Qt.DisplayRole, _c)
-                    count_item.setFlags(count_item.flags() & ~Qt.ItemIsEditable)
-                    self.analytics_table.setItem(row, 2, count_item)
+                    row_idx = self.analytics_data.get(_s["f"])
+                    if row_idx is None:
+                        row_idx = self.analytics_table.rowCount()
+                        self.analytics_table.insertRow(row_idx)
+                        self.analytics_data[_s["f"]] = row_idx
+                        self.analytics_table.setItem(row_idx, 0, readonly_item(_s["f"]))
+                
+                    def num_item(val):
+                        it = QTableWidgetItem()
+                        it.setData(Qt.DisplayRole, val)
+                        it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+                        return it
+                    
+                    self.analytics_table.setItem(row_idx, 1, num_item(_s["n1"]))
+                    self.analytics_table.setItem(row_idx, 2, num_item(_s["n2"]))
+                    self.analytics_table.setItem(row_idx, 3, num_item(_s["u"]))
+                    self.analytics_table.setItem(row_idx, 4, num_item(_s["d"]))
+                    self.analytics_table.setItem(row_idx, 5, readonly_item(_s["src"]))
+                
+                    status_item = readonly_item(_s["status"])
+                    if _s["status"] == "Mismatch":
+                        status_item.setForeground(QColor("#721c24"))
+                        status_item.setBackground(QColor("#f8d7da"))
+                    elif _s["status"] == "Complete":
+                        status_item.setForeground(QColor("#155724"))
+                    self.analytics_table.setItem(row_idx, 6, status_item)
+                
                     self.analytics_table.setSortingEnabled(True)
-                    # Update live counters
-                    self.analytics_total_label.setText(
-                        f"Total Unique Packets: {_t:,}"
-                    )
-                    self.analytics_status.setText(
-                        f"{_l} \u2014 {_n} folder(s) scanned \u2502 {_t:,} unique packets"
-                    )
+                
+                    self.kpi_unique.setText(f"{_s['tot_u']:,}")
+                    self.kpi_kits.setText(f"{_s['tot_kits']:,}")
+                    self.kpi_nas1.setText(f"{_s['tot_n1']:,}")
+                    self.kpi_nas2.setText(f"{_s['tot_n2']:,}")
+                    self.kpi_dups.setText(f"{_s['tot_d']:,}")
+                    self.kpi_mismatch.setText(f"{_s['tot_mm']:,}")
+                
+                    # Re-apply filter
+                    self.filter_analytics_table()
 
                 self.events.put({"type": "ui_call", "callback": update, "result": None})
             return callback
 
-        def task():
-            all_unique = set()
-
-            for idx, config in enumerate(configs, start=1):
-                if self.analytics_cancel_event.is_set():
-                    break
-                nas_label = config.get("_label", config.get("name", "Unknown"))
-                root = config.get("_root", "/")
-
-                self.events.put({"type": "ui_call", "callback": lambda v=nas_label: (
-                    self.analytics_status.setText(f"Connecting to {v}..."),
+        def scan_nas(config):
+            nas_label = config.get("_label", "Unknown")
+            root = config.get("_root", "/")
+            try:
+                client_config = {k: v for k, v in config.items() if not k.startswith("_")}
+                with NasClient(client_config, self.chunk_size_mb.value()) as client:
+                    client.get_packet_analytics(
+                        root=root,
+                        cancel_event=self.analytics_cancel_event,
+                        progress_callback=make_folder_callback(nas_label),
+                    )
+            except Exception as e:
+                self.events.put({"type": "ui_call", "callback": lambda v=nas_label, err=str(e): (
+                    self.analytics_status.setText(f"Error on {v}: {err}"),
                 ), "result": None})
 
-                try:
-                    client_config = {k: v for k, v in config.items() if not k.startswith("_")}
-                    with NasClient(client_config, self.chunk_size_mb.value()) as client:
-                        data = client.get_packet_analytics(
-                            root=root,
-                            cancel_event=self.analytics_cancel_event,
-                            progress_callback=make_folder_callback(nas_label),
-                        )
-                        all_unique.update(data["unique_packets"])
-                except Exception as e:
-                    self.events.put({"type": "ui_call", "callback": lambda v=nas_label, err=str(e): (
-                        self.analytics_status.setText(f"Error on {v}: {err}"),
-                    ), "result": None})
-
-            return {"total": len(all_unique)}
+        def task():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(configs)) as executor:
+                futures = [executor.submit(scan_nas, config) for config in configs]
+                concurrent.futures.wait(futures)
+            return True
 
         def on_complete(data):
             self.analytics_sync_btn.setEnabled(True)
@@ -1066,17 +1223,11 @@ class MainWindow(QMainWindow):
             self.analytics_progress.setMaximum(1)
             self.analytics_progress.setValue(1)
             self.analytics_progress.hide()
-
-            row_count = self.analytics_table.rowCount()
+        
             if self.analytics_cancel_event.is_set():
-                self.analytics_status.setText(
-                    f"Cancelled \u2014 {row_count} folder(s) scanned | {_unique_total[0]:,} unique packets"
-                )
+                self.analytics_status.setText("Scan cancelled.")
             else:
-                self.analytics_status.setText(
-                    f"Sync complete \u2014 {row_count} folder(s) | {data['total']:,} unique packets"
-                )
-            self.analytics_total_label.setText(f"Total Unique Packets: {data['total']:,}")
+                self.analytics_status.setText("Scan complete.")
 
         def on_error(err):
             self.analytics_sync_btn.setEnabled(True)
@@ -1085,7 +1236,7 @@ class MainWindow(QMainWindow):
             self.analytics_progress.setMaximum(1)
             self.analytics_progress.setValue(0)
             self.analytics_progress.hide()
-            self.analytics_status.setText("Error")
+            self.analytics_status.setText("Error during scan.")
             self.background_error(err)
 
         self.run_background(task, on_complete, on_error)
