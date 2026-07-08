@@ -1,0 +1,28 @@
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Build and Dist
+build/
+dist/
+Output/
+*.egg-info/
+*.egg
+*.spec
+
+# PyInstaller
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDEs and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
