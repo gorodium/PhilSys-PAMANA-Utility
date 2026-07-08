@@ -494,6 +494,7 @@ class MainWindow(QMainWindow):
             ("NAS Migration", self.build_dashboard_page()),
             ("Packet Tracker", self.build_packet_page()),
             ("Matrix Restoration", self.build_matrix_page()),
+            ("NAS Analytics", self.build_analytics_page()),
             ("Settings", self.build_settings_page()),
             ("Logs", self.build_logs_page()),
         ]
@@ -903,6 +904,130 @@ class MainWindow(QMainWindow):
         self.matrix_table.customContextMenuRequested.connect(self.show_matrix_context_menu)
         layout.addWidget(self.matrix_table, stretch=1)
         return page
+
+    def build_analytics_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
+        header = QLabel("NAS Packet Analytics")
+        header.setStyleSheet("font-size: 22px; font-weight: 800; color: #0038A8;")
+        layout.addWidget(header)
+
+        top_row = QHBoxLayout()
+        self.analytics_total_label = QLabel("Total Unique Packets: 0")
+        self.analytics_total_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #155724; background: #d4edda; padding: 12px; border-radius: 6px;")
+        
+        self.analytics_sync_btn = QPushButton("Sync Now")
+        self.analytics_sync_btn.setObjectName("PrimaryButton")
+        self.analytics_sync_btn.setFixedWidth(120)
+        self.analytics_sync_btn.clicked.connect(self.sync_nas_analytics)
+
+        self.analytics_cancel_btn = QPushButton("Cancel")
+        self.analytics_cancel_btn.setFixedWidth(80)
+        self.analytics_cancel_btn.clicked.connect(self.cancel_nas_analytics)
+        self.analytics_cancel_btn.hide()
+        
+        self.analytics_status = QLabel("Ready")
+        self.analytics_cancel_event = threading.Event()
+        
+        top_row.addWidget(self.analytics_total_label)
+        top_row.addStretch(1)
+        top_row.addWidget(self.analytics_status)
+        top_row.addWidget(self.analytics_cancel_btn)
+        top_row.addWidget(self.analytics_sync_btn)
+        layout.addLayout(top_row)
+
+        self.analytics_table = QTableWidget(0, 3)
+        self.analytics_table.setHorizontalHeaderLabels(["NAS Source", "Machine Folder", "Packet Count"])
+        self.analytics_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.analytics_table.setSortingEnabled(True)
+        self.analytics_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.analytics_table, stretch=1)
+        return page
+
+    def cancel_nas_analytics(self):
+        self.analytics_cancel_event.set()
+        self.analytics_status.setText("Cancelling...")
+        self.analytics_cancel_btn.setEnabled(False)
+
+    def sync_nas_analytics(self):
+        configs = []
+        for profile in self.config.get("province_profiles", []):
+            if profile.get("host") and profile.get("username"):
+                configs.append(profile)
+                
+        if not configs:
+            QMessageBox.warning(self, "NAS Analytics", "No valid NAS configurations found.")
+            return
+            
+        self.analytics_sync_btn.setEnabled(False)
+        self.analytics_sync_btn.hide()
+        self.analytics_cancel_btn.setEnabled(True)
+        self.analytics_cancel_btn.show()
+        
+        self.analytics_status.setText("Syncing...")
+        self.analytics_table.setRowCount(0)
+        self.analytics_total_label.setText("Total Unique Packets: Syncing...")
+        self.analytics_cancel_event.clear()
+        
+        def task():
+            all_unique = set()
+            results = []
+            
+            for profile in configs:
+                if self.analytics_cancel_event.is_set():
+                    break
+                nas_name = profile.get("province", "Unknown")
+                root = profile.get("root", "/")
+                
+                self.events.put({"type": "ui_call", "callback": lambda v=nas_name: self.analytics_status.setText(f"Scanning {v}..."), "result": None})
+                
+                try:
+                    with NasClient(profile, self.chunk_size_mb.value()) as client:
+                        data = client.get_packet_analytics(root=root, cancel_event=self.analytics_cancel_event)
+                        all_unique.update(data["unique_packets"])
+                        for folder, count in data["folder_counts"].items():
+                            results.append({
+                                "nas": nas_name,
+                                "folder": folder,
+                                "count": count
+                            })
+                except Exception as e:
+                    self.events.put({"type": "ui_call", "callback": lambda v=str(e): print(f"Error scanning NAS: {v}"), "result": None})
+                    
+            return {
+                "total": len(all_unique),
+                "rows": results
+            }
+            
+        def on_complete(data):
+            self.analytics_sync_btn.setEnabled(True)
+            self.analytics_sync_btn.show()
+            self.analytics_cancel_btn.hide()
+            
+            if self.analytics_cancel_event.is_set():
+                self.analytics_status.setText("Cancelled")
+            else:
+                self.analytics_status.setText("Sync Complete")
+            self.analytics_total_label.setText(f"Total Unique Packets: {data['total']}")
+            
+            self.analytics_table.setSortingEnabled(False)
+            self.analytics_table.setRowCount(len(data["rows"]))
+            for row_idx, row in enumerate(data["rows"]):
+                self.analytics_table.setItem(row_idx, 0, readonly_item(row["nas"]))
+                self.analytics_table.setItem(row_idx, 1, readonly_item(row["folder"]))
+                count_item = readonly_item(row["count"])
+                count_item.setData(Qt.UserRole, row["count"])
+                self.analytics_table.setItem(row_idx, 2, count_item)
+            self.analytics_table.setSortingEnabled(True)
+
+        def on_error(err):
+            self.analytics_sync_btn.setEnabled(True)
+            self.analytics_status.setText("Error")
+            self.background_error(err)
+            
+        self.run_background(task, on_complete, on_error)
 
     def build_settings_page(self):
         page = QWidget()
