@@ -979,25 +979,59 @@ class MainWindow(QMainWindow):
                 "Please fill in username and password for NAS1 / NAS2 in Settings.",
             )
             return
-
-
         self.analytics_sync_btn.setEnabled(False)
         self.analytics_sync_btn.hide()
         self.analytics_cancel_btn.setEnabled(True)
         self.analytics_cancel_btn.show()
-        self.analytics_progress.setMaximum(len(configs))
-        self.analytics_progress.setValue(0)
-        self.analytics_progress.setFormat("Scanning... %v / %m")
+
+        # Indeterminate bouncing bar — shows motion even when folder count is unknown
+        self.analytics_progress.setMinimum(0)
+        self.analytics_progress.setMaximum(0)
+        self.analytics_progress.setFormat("Scanning...")
         self.analytics_progress.show()
 
-        self.analytics_status.setText(f"Scanning 0 / {len(configs)} NAS...")
+        self.analytics_status.setText("Connecting...")
         self.analytics_table.setRowCount(0)
-        self.analytics_total_label.setText("Total Unique Packets: Scanning...")
+        self.analytics_total_label.setText("Total Unique Packets: 0")
         self.analytics_cancel_event.clear()
+
+        # Shared mutable counters accessible from the callback (list wrapping int)
+        _folders_done = [0]
+        _unique_total = [0]
+
+        def make_folder_callback(nas_label):
+            """Returns a callback called by NasClient after each machine folder is done."""
+            def callback(folder_name, folder_count, running_unique_total):
+                _folders_done[0] += 1
+                _unique_total[0] = running_unique_total
+                n = _folders_done[0]
+
+                def update(_fn=folder_name, _c=folder_count, _t=running_unique_total,
+                           _l=nas_label, _n=n):
+                    # Add row to table live
+                    self.analytics_table.setSortingEnabled(False)
+                    row = self.analytics_table.rowCount()
+                    self.analytics_table.insertRow(row)
+                    self.analytics_table.setItem(row, 0, readonly_item(_l))
+                    self.analytics_table.setItem(row, 1, readonly_item(_fn))
+                    count_item = QTableWidgetItem()
+                    count_item.setData(Qt.DisplayRole, _c)
+                    count_item.setFlags(count_item.flags() & ~Qt.ItemIsEditable)
+                    self.analytics_table.setItem(row, 2, count_item)
+                    self.analytics_table.setSortingEnabled(True)
+                    # Update live counters
+                    self.analytics_total_label.setText(
+                        f"Total Unique Packets: {_t:,}"
+                    )
+                    self.analytics_status.setText(
+                        f"{_l} \u2014 {_n} folder(s) scanned \u2502 {_t:,} unique packets"
+                    )
+
+                self.events.put({"type": "ui_call", "callback": update, "result": None})
+            return callback
 
         def task():
             all_unique = set()
-            results = []
 
             for idx, config in enumerate(configs, start=1):
                 if self.analytics_cancel_event.is_set():
@@ -1005,61 +1039,55 @@ class MainWindow(QMainWindow):
                 nas_label = config.get("_label", config.get("name", "Unknown"))
                 root = config.get("_root", "/")
 
-                self.events.put({"type": "ui_call", "callback": lambda v=nas_label, i=idx: (
-                    self.analytics_status.setText(f"Scanning {v} ({i}/{len(configs)})..."),
-                    self.analytics_progress.setValue(i - 1),
+                self.events.put({"type": "ui_call", "callback": lambda v=nas_label: (
+                    self.analytics_status.setText(f"Connecting to {v}..."),
                 ), "result": None})
 
                 try:
-                    # Strip internal routing keys before passing to NasClient
                     client_config = {k: v for k, v in config.items() if not k.startswith("_")}
                     with NasClient(client_config, self.chunk_size_mb.value()) as client:
-                        data = client.get_packet_analytics(root=root, cancel_event=self.analytics_cancel_event)
+                        data = client.get_packet_analytics(
+                            root=root,
+                            cancel_event=self.analytics_cancel_event,
+                            progress_callback=make_folder_callback(nas_label),
+                        )
                         all_unique.update(data["unique_packets"])
-                        for folder, count in data["folder_counts"].items():
-                            results.append({
-                                "nas": nas_label,
-                                "folder": folder,
-                                "count": count,
-                            })
                 except Exception as e:
                     self.events.put({"type": "ui_call", "callback": lambda v=nas_label, err=str(e): (
-                        self.analytics_status.setText(f"Error on {v}: {err}")
+                        self.analytics_status.setText(f"Error on {v}: {err}"),
                     ), "result": None})
 
-            return {"total": len(all_unique), "rows": results}
-            
+            return {"total": len(all_unique)}
+
         def on_complete(data):
             self.analytics_sync_btn.setEnabled(True)
             self.analytics_sync_btn.show()
             self.analytics_cancel_btn.hide()
+            self.analytics_progress.setMaximum(1)
+            self.analytics_progress.setValue(1)
             self.analytics_progress.hide()
 
+            row_count = self.analytics_table.rowCount()
             if self.analytics_cancel_event.is_set():
-                self.analytics_status.setText("Cancelled")
+                self.analytics_status.setText(
+                    f"Cancelled \u2014 {row_count} folder(s) scanned | {_unique_total[0]:,} unique packets"
+                )
             else:
-                self.analytics_status.setText(f"Sync complete — {len(data['rows'])} folder(s) found")
+                self.analytics_status.setText(
+                    f"Sync complete \u2014 {row_count} folder(s) | {data['total']:,} unique packets"
+                )
             self.analytics_total_label.setText(f"Total Unique Packets: {data['total']:,}")
-
-            self.analytics_table.setSortingEnabled(False)
-            self.analytics_table.setRowCount(len(data["rows"]))
-            for row_idx, row in enumerate(data["rows"]):
-                self.analytics_table.setItem(row_idx, 0, readonly_item(row["nas"]))
-                self.analytics_table.setItem(row_idx, 1, readonly_item(row["folder"]))
-                count_item = QTableWidgetItem()
-                count_item.setData(Qt.DisplayRole, row["count"])
-                count_item.setFlags(count_item.flags() & ~Qt.ItemIsEditable)
-                self.analytics_table.setItem(row_idx, 2, count_item)
-            self.analytics_table.setSortingEnabled(True)
 
         def on_error(err):
             self.analytics_sync_btn.setEnabled(True)
             self.analytics_sync_btn.show()
             self.analytics_cancel_btn.hide()
+            self.analytics_progress.setMaximum(1)
+            self.analytics_progress.setValue(0)
             self.analytics_progress.hide()
             self.analytics_status.setText("Error")
             self.background_error(err)
-            
+
         self.run_background(task, on_complete, on_error)
 
     def build_settings_page(self):

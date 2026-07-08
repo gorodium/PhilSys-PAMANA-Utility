@@ -493,27 +493,29 @@ class NasClient:
         self.sftp.utime(remote_path, (modified, modified))
         return remote_path
 
-    def get_packet_analytics(self, root="/", cancel_event=None):
+    def get_packet_analytics(self, root="/", cancel_event=None, progress_callback=None):
         """
-        Count all .zip files on the NAS under `root`, grouped by their immediate
-        parent folder name. Returns total unique packet IDs and per-folder counts.
+        Count all .zip files on the NAS under `root`, grouped by immediate parent folder.
+        After each top-level machine folder is fully counted, calls:
+            progress_callback(folder_name, folder_count, running_unique_total)
+        so the UI can stream results live without waiting for the full scan.
 
-        Tries SSH exec `find` first for speed. Falls back to SFTP recursive
-        walking if SSH exec is not supported by the NAS (same pattern as search_packets).
+        Tries SSH exec `find` first; falls back to SFTP per-folder walk.
         """
         root = normalize_remote_path(root)
-        folder_counts = defaultdict(int)
         unique_packets = set()
 
         # ── SSH fast path ────────────────────────────────────────────────────
         if self._check_ssh_exec_works():
             import shlex as _shlex
+            import socket as _socket
             command = f"find {_shlex.quote(root)} -type f -name '*.zip' 2>/dev/null"
             try:
-                _stdin, stdout_ch, _stderr = self.ssh.exec_command(command, timeout=300)
-                # Drain line-by-line while watching for cancellation
-                import socket as _socket
+                _stdin, stdout_ch, _stderr = self.ssh.exec_command(command, timeout=600)
                 stdout_ch.channel.settimeout(2.0)
+
+                # Collect all paths then group by machine folder
+                all_paths = []
                 while not stdout_ch.channel.exit_status_ready():
                     if cancel_event and cancel_event.is_set():
                         raise RuntimeError("Packet analytics cancelled.")
@@ -522,63 +524,98 @@ class NasClient:
                         if line:
                             line = line.strip()
                             if line:
-                                filename = posixpath.basename(line)
-                                folder = posixpath.basename(posixpath.dirname(line))
-                                if filename.lower().endswith(".zip"):
-                                    packet_id = filename[:-4].lower()
-                                    unique_packets.add(packet_id)
-                                    folder_counts[folder] += 1
+                                all_paths.append(line)
                     except _socket.timeout:
                         pass
-                # Drain remainder
                 stdout_ch.channel.settimeout(None)
                 for line in stdout_ch:
                     if cancel_event and cancel_event.is_set():
                         raise RuntimeError("Packet analytics cancelled.")
                     line = line.strip()
                     if line:
-                        filename = posixpath.basename(line)
-                        folder = posixpath.basename(posixpath.dirname(line))
-                        if filename.lower().endswith(".zip"):
-                            packet_id = filename[:-4].lower()
-                            unique_packets.add(packet_id)
-                            folder_counts[folder] += 1
+                        all_paths.append(line)
+
+                # Group by top-level machine folder (first dir segment under root)
+                from collections import defaultdict as _dd
+                machine_folder_unique = _dd(set)
+                root_prefix = root.rstrip("/") + "/"
+                for p in all_paths:
+                    filename = posixpath.basename(p)
+                    if not filename.lower().endswith(".zip"):
+                        continue
+                    # Determine which machine folder (immediate child of root)
+                    rel = p[len(root_prefix):] if p.startswith(root_prefix) else posixpath.basename(posixpath.dirname(p))
+                    machine_folder = rel.split("/")[0]
+                    packet_id = filename[:-4].lower()
+                    machine_folder_unique[machine_folder].add(packet_id)
+
+                folder_counts = {}
+                for folder_name, pkts in sorted(machine_folder_unique.items()):
+                    if cancel_event and cancel_event.is_set():
+                        break
+                    folder_counts[folder_name] = len(pkts)
+                    unique_packets.update(pkts)
+                    if progress_callback:
+                        progress_callback(folder_name, len(pkts), len(unique_packets))
+
                 return {
                     "total_unique": len(unique_packets),
                     "unique_packets": unique_packets,
-                    "folder_counts": dict(folder_counts),
+                    "folder_counts": folder_counts,
                 }
             except RuntimeError:
                 raise
             except Exception:
                 pass  # Fall through to SFTP walk
 
-        # ── SFTP recursive walk fallback ─────────────────────────────────────
-        stack = [root]
-        while stack:
+        # ── SFTP optimised walk: one top-level folder at a time ───────────────
+        # Step 1: list immediate children of root to get machine folders
+        try:
+            top_items = self.sftp.listdir_attr(root)
+        except OSError:
+            return {"total_unique": 0, "unique_packets": set(), "folder_counts": {}}
+
+        machine_folders = sorted(
+            [item for item in top_items if is_remote_dir(item)],
+            key=lambda x: x.filename,
+        )
+
+        folder_counts = {}
+        for folder_item in machine_folders:
             if cancel_event and cancel_event.is_set():
                 raise RuntimeError("Packet analytics cancelled.")
-            current = stack.pop()
-            try:
-                items = self.sftp.listdir_attr(current)
-            except OSError:
-                continue
-            for item in items:
+
+            folder_name = folder_item.filename
+            folder_path = remote_join(root, folder_name)
+            folder_unique = set()
+
+            # Walk this single machine folder (may have sub-folders inside)
+            stack = [folder_path]
+            while stack:
                 if cancel_event and cancel_event.is_set():
                     raise RuntimeError("Packet analytics cancelled.")
-                item_path = remote_join(current, item.filename)
-                if is_remote_dir(item):
-                    stack.append(item_path)
-                elif is_remote_file(item) and item.filename.lower().endswith(".zip"):
-                    folder = posixpath.basename(current)
-                    packet_id = item.filename[:-4].lower()
-                    unique_packets.add(packet_id)
-                    folder_counts[folder] += 1
+                current = stack.pop()
+                try:
+                    items = self.sftp.listdir_attr(current)
+                except OSError:
+                    continue
+                for item in items:
+                    item_path = remote_join(current, item.filename)
+                    if is_remote_dir(item):
+                        stack.append(item_path)
+                    elif is_remote_file(item) and item.filename.lower().endswith(".zip"):
+                        folder_unique.add(item.filename[:-4].lower())
+
+            if folder_unique:
+                folder_counts[folder_name] = len(folder_unique)
+                unique_packets.update(folder_unique)
+                if progress_callback:
+                    progress_callback(folder_name, len(folder_unique), len(unique_packets))
 
         return {
             "total_unique": len(unique_packets),
             "unique_packets": unique_packets,
-            "folder_counts": dict(folder_counts),
+            "folder_counts": folder_counts,
         }
 
 
