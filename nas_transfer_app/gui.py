@@ -960,29 +960,26 @@ class MainWindow(QMainWindow):
         self.analytics_cancel_btn.setEnabled(False)
 
     def sync_nas_analytics(self):
-        # Build configs using the proper credential-aware method
-        profiles = self.province_profiles()
+        # Build configs from the NAS Credentials saved in Settings (NAS1 / NAS2)
         configs = []
-        for profile in profiles:
-            profile_id = profile.get("id", "")
-            if not profile.get("host") or not profile.get("username"):
-                continue
+        for nas_name in ("NAS1", "NAS2"):
             try:
-                config = self.province_nas_config(profile_id)
-                config["_root"] = normalize_remote_path(profile.get("root", "/"))
-                config["_label"] = self.province_profile_label(profile)
+                config = self.nas_config(nas_name)
+                config["_root"] = "/"
+                config["_label"] = nas_name
                 configs.append(config)
             except Exception:
-                pass  # skip profiles with missing passwords
+                pass  # skip if credentials are missing
 
         if not configs:
             QMessageBox.warning(
                 self,
                 "NAS Analytics",
-                "No province NAS profiles found or none have saved passwords.\n"
-                "Please configure your province profiles in Settings.",
+                "NAS credentials are not configured or missing.\n"
+                "Please fill in username and password for NAS1 / NAS2 in Settings.",
             )
             return
+
 
         self.analytics_sync_btn.setEnabled(False)
         self.analytics_sync_btn.hide()
