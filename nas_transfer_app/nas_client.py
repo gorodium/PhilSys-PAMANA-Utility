@@ -505,65 +505,63 @@ class NasClient:
 
     def get_packet_analytics(self, root="/", cancel_event=None, progress_callback=None):
         """
-        Count all .zip files on the NAS under `root`, grouped by immediate parent folder.
-        After each top-level machine folder is fully counted, calls:
-            progress_callback(folder_name, folder_packets_set, running_unique_total)
-        so the UI can stream results live without waiting for the full scan.
+        Count all .zip files on the NAS under `root`, grouped by PRO-LPT folder.
+        Calls progress_callback(folder_name, folder_packets_set, running_unique_total)
+        as results stream in live.
 
-        Tries SSH exec `find` first; falls back to SFTP per-folder walk.
+        Tries SSH exec `find` first; falls back to SFTP 2-level listing.
         """
-        root = normalize_remote_path(root)
+        root = normalize_remote_path(root).rstrip("/")
         unique_packets = set()
 
         # ── SSH fast path ────────────────────────────────────────────────────
         if self._check_ssh_exec_works():
-            import shlex as _shlex
             import socket as _socket
             from collections import defaultdict as _dd
-            
-            # Since PRO-LPT folders are immediate children of the root directory (or close to it),
-            # we use shell globbing to target them explicitly. This completely bypasses
-            # traversing millions of irrelevant files in other directories and works on all NAS shells
-            # without relying on `-maxdepth` or spawning hundreds of sub-processes.
-            
-            # Note: We append the glob to the root path safely.
-            # Example: find "/Misamis Oriental"/PRO-LPT* -type f -name '*.zip'
-            root_quoted = _shlex.quote(root.rstrip('/'))
-            command = f"find {root_quoted}/PRO-LPT* {root_quoted}/*/PRO-LPT* {root_quoted}/*/*/PRO-LPT* -type f -name '*.zip' 2>/dev/null"
-            
+
+            # IMPORTANT: We must NOT use shlex.quote on the glob pattern part —
+            # quoting would escape the * and make it a literal filename.
+            # We quote the root separately and append the unquoted glob parts.
+            import shlex as _shlex
+            root_q = _shlex.quote(root)
+
+            # Build command: search PRO-LPT* at root level and one level deep
+            # e.g.  find "/Misamis Oriental/PRO-LPT"* "/Misamis Oriental/"*"/PRO-LPT"* -type f -name "*.zip"
+            # Use printf to flush each line immediately (NAS stdout buffering workaround)
+            command = (
+                f"find {root_q}/PRO-LPT* {root_q}/*/PRO-LPT* {root_q}/*/*/PRO-LPT*"
+                f" -type f -name '*.zip' 2>/dev/null"
+            )
+
             try:
                 _stdin, stdout_ch, _stderr = self.ssh.exec_command(command, timeout=600)
                 stdout_ch.channel.settimeout(2.0)
 
                 machine_folder_unique = _dd(set)
-                root_prefix = root.rstrip("/") + "/"
-                
                 updated_folders = set()
-                batch_state = [0]
-                
+                batch_count = [0]
+
                 def process_path(p):
-                    filename = posixpath.basename(p)
-                    if not filename.lower().endswith(".zip"):
+                    p = p.strip()
+                    if not p.lower().endswith(".zip"):
                         return
-                        
+                    filename = posixpath.basename(p)
                     parts = p.split("/")
                     machine_folder = None
                     for part in parts:
                         if part.upper().startswith("PRO-LPT"):
                             machine_folder = part
                             break
-                            
                     if not machine_folder:
                         return
-                        
                     packet_id = filename[:-4].lower()
                     machine_folder_unique[machine_folder].add(packet_id)
                     unique_packets.add(packet_id)
                     updated_folders.add(machine_folder)
-                
+
                 def flush_updates():
                     if progress_callback:
-                        for f in updated_folders:
+                        for f in list(updated_folders):
                             progress_callback(f, machine_folder_unique[f], len(unique_packets))
                     updated_folders.clear()
 
@@ -572,82 +570,79 @@ class NasClient:
                     if cancel_event and cancel_event.is_set():
                         raise RuntimeError("Packet analytics cancelled.")
                     try:
-                        chunk_bytes = stdout_ch.channel.recv(8192)
+                        chunk_bytes = stdout_ch.channel.recv(65536)
                         if not chunk_bytes:
                             break
-                        buffer += chunk_bytes.decode('utf-8', errors='replace')
-                        if '\n' in buffer:
-                            lines = buffer.split('\n')
-                            buffer = lines.pop()
-                            for line in lines:
-                                line = line.strip()
-                                if line:
-                                    process_path(line)
-                                    batch_state[0] += 1
-                                    if batch_state[0] >= 1000:
-                                        flush_updates()
-                                        batch_state[0] = 0
+                        buffer += chunk_bytes.decode("utf-8", errors="replace")
+                        while "\n" in buffer:
+                            line, buffer = buffer.split("\n", 1)
+                            line = line.strip()
+                            if line:
+                                process_path(line)
+                                batch_count[0] += 1
+                                if batch_count[0] >= 100:
+                                    flush_updates()
+                                    batch_count[0] = 0
                     except _socket.timeout:
-                        if batch_state[0] > 0:
+                        if updated_folders:
                             flush_updates()
-                            batch_state[0] = 0
+                            batch_count[0] = 0
 
-                # Process any remaining buffer
-                if buffer:
-                    line = buffer.strip()
+                # Drain any remaining data
+                while True:
+                    try:
+                        stdout_ch.channel.settimeout(1.0)
+                        chunk_bytes = stdout_ch.channel.recv(65536)
+                        if not chunk_bytes:
+                            break
+                        buffer += chunk_bytes.decode("utf-8", errors="replace")
+                    except _socket.timeout:
+                        break
+
+                for line in buffer.split("\n"):
+                    line = line.strip()
                     if line:
                         process_path(line)
-                        
-                stdout_ch.channel.settimeout(None)
-                # Channel is already exhausted, no need to loop stdout_ch again
 
                 if updated_folders:
                     flush_updates()
 
+                total = len(unique_packets)
+                print(f"[Analytics SSH] Done. {total} unique packets across {len(machine_folder_unique)} kits.")
                 return {
-                    "total_unique": len(unique_packets),
+                    "total_unique": total,
                     "unique_packets": unique_packets,
                     "folder_unique_packets": dict(machine_folder_unique),
                 }
             except RuntimeError:
                 raise
             except Exception as e:
-                print(f"SSH fast path failed: {repr(e)}")
-                pass  # Fall through to SFTP walk
+                print(f"[Analytics SSH] Fast path failed: {repr(e)} — falling back to SFTP")
 
-        # ── SFTP fallback path ───────────────────────────────────────────────
-        machine_folders = []
-        try:
-            # BFS to find PRO-LPT folders up to depth 4
-            queue = [(root, 0)]
-            visited = set()
-            
-            while queue:
-                if cancel_event and cancel_event.is_set():
-                    raise RuntimeError("Packet analytics cancelled.")
-                
-                current_dir, depth = queue.pop(0)
-                if current_dir in visited or depth > 4:
-                    continue
-                visited.add(current_dir)
-                
-                try:
-                    items = self.sftp.listdir_attr(current_dir)
-                except OSError:
-                    continue
-                    
-                for item in items:
-                    if not is_remote_dir(item):
-                        continue
-                    if item.filename.upper().startswith("PRO-LPT"):
-                        machine_folders.append((item.filename, remote_join(current_dir, item.filename)))
-                    else:
-                        if depth < 4:
-                            queue.append((remote_join(current_dir, item.filename), depth + 1))
-        except Exception:
-            pass
+        # ── SFTP fallback: list root + one level deep only ───────────────────
+        print(f"[Analytics SFTP] Starting SFTP fallback scan of {root}")
+        machine_folders = []  # list of (name, full_path)
 
+        def _collect_pro_lpt(directory, depth=0):
+            """Collect PRO-LPT folders at this directory level only."""
+            if cancel_event and cancel_event.is_set():
+                return
+            try:
+                items = self.sftp.listdir_attr(directory)
+            except OSError:
+                return
+            for item in items:
+                if not is_remote_dir(item):
+                    continue
+                if item.filename.upper().startswith("PRO-LPT"):
+                    machine_folders.append((item.filename, remote_join(directory, item.filename)))
+                elif depth == 0:
+                    # Only go one level deeper to find nested PRO-LPT folders
+                    _collect_pro_lpt(remote_join(directory, item.filename), depth=1)
+
+        _collect_pro_lpt(root)
         machine_folders.sort(key=lambda x: x[0])
+        print(f"[Analytics SFTP] Found {len(machine_folders)} PRO-LPT kit folders.")
 
         folder_unique_packets = {}
         for folder_name, folder_path in machine_folders:
@@ -655,8 +650,6 @@ class NasClient:
                 raise RuntimeError("Packet analytics cancelled.")
 
             folder_unique = set()
-
-            # Walk this single machine folder (may have sub-folders inside)
             stack = [folder_path]
             while stack:
                 if cancel_event and cancel_event.is_set():
@@ -676,14 +669,19 @@ class NasClient:
             if folder_unique:
                 folder_unique_packets[folder_name] = folder_unique
                 unique_packets.update(folder_unique)
-                if progress_callback:
-                    progress_callback(folder_name, folder_unique, len(unique_packets))
+
+            # Always call progress_callback after each folder (even if empty, so UI knows kit exists)
+            if progress_callback:
+                progress_callback(folder_name, folder_unique, len(unique_packets))
 
         return {
             "total_unique": len(unique_packets),
             "unique_packets": unique_packets,
             "folder_unique_packets": folder_unique_packets,
         }
+
+
+
 
 
 def copy_remote_to_remote(source_config, destination_config, source_path, destination_folder, chunk_size_mb=DEFAULT_CHUNK_SIZE_MB, max_retries=3):
