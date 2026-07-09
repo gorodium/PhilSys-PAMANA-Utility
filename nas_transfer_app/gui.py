@@ -1050,6 +1050,14 @@ class MainWindow(QMainWindow):
         self.analytics_cancel_btn.setEnabled(False)
 
     def sync_nas_analytics(self):
+        import traceback, os
+        debug_log = os.path.join(os.path.expanduser("~"), "philsys_gui_debug.log")
+        def dbg(msg):
+            with open(debug_log, "a") as f:
+                f.write(msg + "\n")
+                
+        dbg("--- sync_nas_analytics called ---")
+        
         configs = []
         for nas_name in ("NAS1", "NAS2"):
             try:
@@ -1057,10 +1065,12 @@ class MainWindow(QMainWindow):
                 config["_root"] = normalize_remote_path(self.analytics_base_scan_dir.text() or "/Misamis Oriental")
                 config["_label"] = nas_name
                 configs.append(config)
-            except Exception:
-                pass
+                dbg(f"Config loaded for {nas_name}")
+            except Exception as e:
+                dbg(f"Config load failed for {nas_name}: {e}")
 
         if not configs:
+            dbg("No configs! Showing messagebox and returning.")
             QMessageBox.warning(
                 self,
                 "NAS Analytics",
@@ -1200,30 +1210,41 @@ class MainWindow(QMainWindow):
         def scan_nas(config):
             nas_label = config.get("_label", "Unknown")
             root = config.get("_root", "/")
+            dbg(f"Inside scan_nas for {nas_label}")
             try:
                 client_config = {k: v for k, v in config.items() if not k.startswith("_")}
                 with NasClient(client_config, chunk_size) as client:
+                    dbg(f"NasClient context entered for {nas_label}")
                     client.get_packet_analytics(
                         root=root,
                         cancel_event=self.analytics_cancel_event,
                         progress_callback=make_folder_callback(nas_label),
                     )
+                dbg(f"scan_nas completed for {nas_label}")
             except Exception as e:
+                dbg(f"Exception in scan_nas {nas_label}: {e}")
+                dbg(traceback.format_exc())
                 self.events.put({"type": "ui_call", "callback": lambda v=nas_label, err=str(e): (
                     self.analytics_status.setText(f"Error on {v}: {err}"),
                 ), "result": None})
 
         def task():
+            dbg("task thread started")
             for config in configs:
+                nas_label = config.get("_label", "Unknown")
+                dbg(f"Processing config for {nas_label}...")
                 if self.analytics_cancel_event.is_set():
+                    dbg(f"Cancel event is set! Aborting before {nas_label}")
                     break
                 
-                nas_label = config.get("_label", "Unknown")
                 self.events.put({"type": "ui_call", "callback": lambda v=nas_label: (
                     self.analytics_status.setText(f"Scanning {v}...")
                 ), "result": None})
                 
+                dbg(f"Calling scan_nas for {nas_label}")
                 scan_nas(config)
+            
+            dbg("task thread completed")
             return True
 
         def on_complete(data):
