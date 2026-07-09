@@ -1214,10 +1214,16 @@ class MainWindow(QMainWindow):
                 ), "result": None})
 
         def task():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(configs)) as executor:
-                futures = [executor.submit(scan_nas, config) for config in configs]
-                concurrent.futures.wait(futures)
+            for config in configs:
+                if self.analytics_cancel_event.is_set():
+                    break
+                
+                nas_label = config.get("_label", "Unknown")
+                self.events.put({"type": "ui_call", "callback": lambda v=nas_label: (
+                    self.analytics_status.setText(f"Scanning {v}...")
+                ), "result": None})
+                
+                scan_nas(config)
             return True
 
         def on_complete(data):
